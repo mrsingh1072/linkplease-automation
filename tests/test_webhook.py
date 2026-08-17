@@ -72,6 +72,21 @@ async def test_webhook_valid_signature_returns_200(app_client):
     assert resp.status_code == 200
 
 
+async def test_webhook_signature_disabled_returns_200_without_signature(app_client, monkeypatch):
+    from app.config import get_settings
+    get_settings.cache_clear()
+    monkeypatch.setenv("VERIFY_WEBHOOK_SIGNATURE", "false")
+    payload = _comment_payload()
+    raw = json.dumps(payload).encode("utf-8")
+    resp = await app_client.post(
+        "/webhook",
+        content=raw,
+        headers={"Content-Type": "application/json"},
+    )
+    assert resp.status_code == 200
+    get_settings.cache_clear()
+
+
 # -----------------------------------------------------------------------
 # Event deduplication
 # -----------------------------------------------------------------------

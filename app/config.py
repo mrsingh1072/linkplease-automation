@@ -8,6 +8,7 @@ class Settings(BaseSettings):
     pseudogram_base_url: str = "https://pseudogram-api.onrender.com"
     mongodb_url: str = "mongodb://localhost:27017"
     database_name: str = "linkplease"
+    verify_webhook_signature: bool = True
 
     model_config = {"env_file": ".env", "case_sensitive": False}
 

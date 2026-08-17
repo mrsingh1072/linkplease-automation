@@ -66,9 +66,10 @@ async def receive_webhook(request: Request) -> Response:
     raw_body = await request.body()
 
     # --- Part B: Signature verification ---
-    sig_header = request.headers.get("X-PseudoGram-Signature", "")
-    if not _verify_signature(raw_body, sig_header, settings.pseudogram_api_key):
-        raise HTTPException(status_code=401, detail="Invalid or missing webhook signature")
+    if settings.verify_webhook_signature:
+        sig_header = request.headers.get("X-PseudoGram-Signature", "")
+        if not _verify_signature(raw_body, sig_header, settings.pseudogram_api_key):
+            raise HTTPException(status_code=401, detail="Invalid or missing webhook signature")
 
     try:
         payload: dict[str, Any] = await request.json()
