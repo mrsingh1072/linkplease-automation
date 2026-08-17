@@ -302,3 +302,84 @@ async def test_missing_event_type_returns_400(app_client):
     raw, headers = signed_webhook(payload)
     resp = await app_client.post("/webhook", content=raw, headers=headers)
     assert resp.status_code == 400
+
+
+async def test_webhook_deterministic_signature(app_client, monkeypatch):
+    from app.config import get_settings
+    get_settings.cache_clear()
+    monkeypatch.setenv("PSEUDOGRAM_API_KEY", "test-secret")
+    monkeypatch.setenv("VERIFY_WEBHOOK_SIGNATURE", "true")
+    get_settings.cache_clear()
+    
+    body = b'{"event_id":"evt_det_123","event_type":"comment.created","comment_id":"c1","text":"PRICE","from":{"user_id":"u1"}}'
+    import hashlib
+    import hmac
+    
+    expected = hmac.new(
+        b"test-secret",
+        body,
+        hashlib.sha256
+    ).hexdigest()
+    
+    # 1. Verify correct signature is accepted
+    resp = await app_client.post(
+        "/webhook",
+        content=body,
+        headers={
+            "Content-Type": "application/json",
+            "X-PseudoGram-Signature": f"sha256={expected}"
+        }
+    )
+    assert resp.status_code == 200
+    
+    # 2. Verify modified body is rejected
+    resp_mod_body = await app_client.post(
+        "/webhook",
+        content=body + b" ",
+        headers={
+            "Content-Type": "application/json",
+            "X-PseudoGram-Signature": f"sha256={expected}"
+        }
+    )
+    assert resp_mod_body.status_code == 401
+    
+    # 3. Verify modified signature is rejected
+    resp_mod_sig = await app_client.post(
+        "/webhook",
+        content=body,
+        headers={
+            "Content-Type": "application/json",
+            "X-PseudoGram-Signature": f"sha256={expected}1"
+        }
+    )
+    assert resp_mod_sig.status_code == 401
+    
+    # 4. Verify missing signature is rejected
+    resp_missing = await app_client.post(
+        "/webhook",
+        content=body,
+        headers={"Content-Type": "application/json"}
+    )
+    assert resp_missing.status_code == 401
+    
+    # 5. Verify malformed signature is rejected
+    resp_malformed = await app_client.post(
+        "/webhook",
+        content=body,
+        headers={
+            "Content-Type": "application/json",
+            "X-PseudoGram-Signature": "sha256="
+        }
+    )
+    assert resp_malformed.status_code == 401
+    
+    # 6. Verify verification disabled accepts the request
+    monkeypatch.setenv("VERIFY_WEBHOOK_SIGNATURE", "false")
+    get_settings.cache_clear()
+    resp_disabled = await app_client.post(
+        "/webhook",
+        content=body,
+        headers={"Content-Type": "application/json"}
+    )
+    assert resp_disabled.status_code == 200
+    get_settings.cache_clear()
