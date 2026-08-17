@@ -5,7 +5,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi import APIRouter, Header, HTTPException, Request, Response
 from pymongo.errors import DuplicateKeyError
 
 from ..config import get_settings
@@ -26,7 +26,8 @@ def _verify_signature(raw_body: bytes, header: str, api_key: str) -> bool:
     The HMAC key is the PseudoGram API key.
     The message is the exact raw request body bytes (not re-serialized JSON).
     """
-    if not header.startswith(_SIG_PREFIX):
+    header = (header or "").strip()
+    if not header.startswith(_SIG_PREFIX) or not api_key:
         return False
     provided_hex = header[len(_SIG_PREFIX):]
     expected_hex = hmac.new(
@@ -55,7 +56,14 @@ def _extract_comment_fields(payload: dict[str, Any]) -> tuple[str | None, str, s
 
 
 @router.post("/webhook", status_code=200)
-async def receive_webhook(request: Request) -> Response:
+async def receive_webhook(
+    request: Request,
+    x_pseudogram_signature: str | None = Header(
+        None,
+        alias="X-PseudoGram-Signature",
+        description="HMAC-SHA256 signature of the raw request body using PSEUDOGRAM_API_KEY (format: sha256=<hex>)",
+    ),
+) -> dict[str, str]:
     """
     Receive a comment webhook from PseudoGram.
 
@@ -67,7 +75,7 @@ async def receive_webhook(request: Request) -> Response:
 
     # --- Part B: Signature verification ---
     if settings.verify_webhook_signature:
-        sig_header = request.headers.get("X-PseudoGram-Signature", "")
+        sig_header = x_pseudogram_signature or request.headers.get("X-PseudoGram-Signature", "")
         if not _verify_signature(raw_body, sig_header, settings.pseudogram_api_key):
             raise HTTPException(status_code=401, detail="Invalid or missing webhook signature")
 
@@ -99,7 +107,7 @@ async def receive_webhook(request: Request) -> Response:
         # Duplicate event_id — acknowledge but do not re-process.
         # Do NOT increment duplicates_blocked here: this is event dedup, not DM dedup.
         logger.debug("Duplicate event %s ignored", event_id)
-        return Response(status_code=200)
+        return {"status": "accepted"}
 
     # --- Dispatch ---
     if event_type == "comment.created":
@@ -114,7 +122,7 @@ async def receive_webhook(request: Request) -> Response:
         {"$set": {"processed": True}},
     )
 
-    return Response(status_code=200)
+    return {"status": "accepted"}
 
 
 async def _handle_comment_created(payload: dict[str, Any], db) -> None:
