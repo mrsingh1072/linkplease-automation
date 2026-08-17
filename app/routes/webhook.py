@@ -18,16 +18,6 @@ router = APIRouter()
 _SIG_PREFIX = "sha256="
 
 
-def _key_fingerprint(key: str) -> str:
-    """Return first 8 chars of SHA-256 hash of the key string — safe to log."""
-    return hashlib.sha256(key.encode("utf-8")).hexdigest()[:8]
-
-
-def _compute_hmac(key_bytes: bytes, body: bytes) -> str:
-    """Compute HMAC-SHA256 hex digest."""
-    return hmac.new(key_bytes, body, hashlib.sha256).hexdigest()
-
-
 def _verify_signature(raw_body: bytes, header: str, api_key: str) -> tuple[bool, str]:
     """
     Verify HMAC-SHA256 webhook signature using constant-time comparison.
@@ -36,70 +26,64 @@ def _verify_signature(raw_body: bytes, header: str, api_key: str) -> tuple[bool,
     The HMAC key is the PseudoGram API key.
     The message is the exact raw request body bytes (not re-serialized JSON).
 
-    To handle potential key-format differences with PseudoGram, tries multiple
-    key derivations:
-      1. Full API key as UTF-8 bytes
-      2. Only the hex-token suffix (after the last dot) as UTF-8
-      3. The hex-token suffix decoded from hex to raw bytes
-
     Returns (is_valid, reason_code) for safe diagnostic logging (NO SECRETS LOGGED).
     """
-    cleaned_api_key = (api_key or "").strip().strip('"').strip("'")
+    cleaned_api_key = (api_key or "").strip()
     if not cleaned_api_key:
+        logger.warning("Webhook signature verification failed: API key is empty")
         return False, "missing_api_key"
 
     header_clean = (header or "").strip()
     if not header_clean:
+        logger.warning("Webhook signature verification failed: X-PseudoGram-Signature header is missing")
         return False, "missing_signature_header"
 
     if not header_clean.lower().startswith(_SIG_PREFIX):
+        logger.warning("Webhook signature verification failed: malformed header prefix")
         return False, "malformed_signature_prefix"
 
-    provided_hex = header_clean[len(_SIG_PREFIX):].strip().lower()
-    if not provided_hex:
-        return False, "empty_signature_hex"
+    received_digest = header_clean[len(_SIG_PREFIX):].strip().lower()
+    if not received_digest:
+        logger.warning("Webhook signature verification failed: empty received digest")
+        return False, "empty_signature_digest"
 
-    # Build candidate HMAC keys to try
-    key_candidates: list[tuple[str, bytes]] = [
-        ("full_key_utf8", cleaned_api_key.encode("utf-8")),
-    ]
+    expected_digest = hmac.new(
+        cleaned_api_key.encode("utf-8"),
+        raw_body,
+        hashlib.sha256,
+    ).hexdigest().lower()
 
-    # If the key has a dot, also try the suffix portion
-    if "." in cleaned_api_key:
-        suffix = cleaned_api_key.rsplit(".", 1)[1]
-        key_candidates.append(("suffix_utf8", suffix.encode("utf-8")))
-        try:
-            key_candidates.append(("suffix_hex_decoded", bytes.fromhex(suffix)))
-        except ValueError:
-            pass  # suffix is not valid hex
+    # Calculate safe diagnostic fingerprints (NEVER log secrets or complete signatures)
+    api_key_fp = hashlib.sha256(cleaned_api_key.encode("utf-8")).hexdigest()[:8]
+    rec_sig_fp = hashlib.sha256(received_digest.encode("utf-8")).hexdigest()[:8]
+    exp_sig_fp = hashlib.sha256(expected_digest.encode("utf-8")).hexdigest()[:8]
 
-    # Try each candidate
-    for key_name, key_bytes in key_candidates:
-        expected_hex = _compute_hmac(key_bytes, raw_body)
-        if hmac.compare_digest(expected_hex.lower(), provided_hex):
-            if key_name != "full_key_utf8":
-                logger.info(
-                    "Signature matched using key derivation '%s' (api_key_len=%d, body_bytes=%d)",
-                    key_name, len(cleaned_api_key), len(raw_body),
-                )
-            return True, f"valid:{key_name}"
+    matches = hmac.compare_digest(expected_digest, received_digest)
 
-    # None matched — log diagnostics (safe: only lengths and fingerprints)
-    primary_expected = _compute_hmac(cleaned_api_key.encode("utf-8"), raw_body)
-    logger.warning(
-        "Webhook signature mismatch: "
-        "body_bytes=%d, api_key_len=%d, api_key_fp=%s, "
-        "received_hex_len=%d, received_hex_head=%s, "
-        "expected_hex_len=%d, expected_hex_head=%s",
-        len(raw_body),
+    logger.info(
+        "Webhook signature verification diagnostics: "
+        "api_key_length=%d, "
+        "api_key_fingerprint=%s, "
+        "body_length=%d, "
+        "received_signature_length=%d, "
+        "expected_signature_length=%d, "
+        "received_signature_fingerprint=%s, "
+        "expected_signature_fingerprint=%s, "
+        "matches=%s",
         len(cleaned_api_key),
-        _key_fingerprint(cleaned_api_key),
-        len(provided_hex),
-        provided_hex[:8],
-        len(primary_expected),
-        primary_expected[:8],
+        api_key_fp,
+        len(raw_body),
+        len(received_digest),
+        len(expected_digest),
+        rec_sig_fp,
+        exp_sig_fp,
+        matches,
     )
-    return False, "signature_mismatch"
+
+    if not matches:
+        return False, "signature_mismatch"
+
+    return True, "valid"
 
 
 def _extract_comment_fields(payload: dict[str, Any]) -> tuple[str | None, str, str | None]:
@@ -137,15 +121,6 @@ async def receive_webhook(
     settings = get_settings()
     raw_body = await request.body()
 
-    # Diagnostic logging (Safe: NO secrets, keys, or complete signatures logged)
-    logger.info(
-        "Received POST /webhook: body_bytes=%d, verify_sig=%s, api_key_len=%d, api_key_fp=%s",
-        len(raw_body),
-        settings.verify_webhook_signature,
-        len(settings.pseudogram_api_key),
-        _key_fingerprint(settings.pseudogram_api_key),
-    )
-
     # --- Part B: Signature verification ---
     if settings.verify_webhook_signature:
         sig_header = (
@@ -159,13 +134,6 @@ async def receive_webhook(
             raw_body=raw_body,
             header=sig_header,
             api_key=settings.pseudogram_api_key,
-        )
-
-        logger.info(
-            "Signature check: has_header=%s, is_valid=%s, reason=%s",
-            bool(sig_header),
-            is_valid,
-            reason,
         )
 
         if not is_valid:
