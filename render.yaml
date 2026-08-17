@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: linkplease-automation
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT --workers 1
+    envVars:
+      - key: PSEUDOGRAM_API_KEY
+        sync: false          # set manually in Render dashboard
+      - key: MONGODB_URL
+        sync: false          # set manually (use MongoDB Atlas)
+      - key: DATABASE_NAME
+        value: linkplease
+      - key: PSEUDOGRAM_BASE_URL
+        value: https://pseudogram-api.onrender.com
