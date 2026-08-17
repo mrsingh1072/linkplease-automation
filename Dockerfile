@@ -12,4 +12,4 @@ COPY . .
 EXPOSE 8000
 
 # Uvicorn with 1 worker (asyncio worker handles all I/O concurrently)
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
+CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000} --workers 1"]
