@@ -18,24 +18,48 @@ router = APIRouter()
 _SIG_PREFIX = "sha256="
 
 
-def _verify_signature(raw_body: bytes, header: str, api_key: str) -> bool:
+def _verify_signature(raw_body: bytes, header: str, api_key: str) -> tuple[bool, str]:
     """
     Verify HMAC-SHA256 webhook signature using constant-time comparison.
 
     Expected header format: 'sha256=<hex-digest>'
     The HMAC key is the PseudoGram API key.
     The message is the exact raw request body bytes (not re-serialized JSON).
+
+    Returns (is_valid, reason_code) for safe diagnostic logging (NO SECRETS LOGGED).
     """
-    header = (header or "").strip()
-    if not header.startswith(_SIG_PREFIX) or not api_key:
-        return False
-    provided_hex = header[len(_SIG_PREFIX):]
+    cleaned_api_key = (api_key or "").strip().strip('"').strip("'")
+    if not cleaned_api_key:
+        return False, "missing_api_key"
+
+    header_clean = (header or "").strip()
+    if not header_clean:
+        return False, "missing_signature_header"
+
+    if not header_clean.lower().startswith(_SIG_PREFIX):
+        return False, "malformed_signature_prefix"
+
+    provided_hex = header_clean[len(_SIG_PREFIX):].strip()
+    if not provided_hex:
+        return False, "empty_signature_hex"
+
     expected_hex = hmac.new(
-        api_key.encode("utf-8"),
+        cleaned_api_key.encode("utf-8"),
         raw_body,
         hashlib.sha256,
     ).hexdigest()
-    return hmac.compare_digest(expected_hex, provided_hex)
+
+    is_valid = hmac.compare_digest(expected_hex.lower(), provided_hex.lower())
+    if not is_valid:
+        logger.warning(
+            "Webhook signature mismatch: body_bytes=%d, received_hex_len=%d, expected_hex_len=%d",
+            len(raw_body),
+            len(provided_hex),
+            len(expected_hex),
+        )
+        return False, "signature_mismatch"
+
+    return True, "valid"
 
 
 def _extract_comment_fields(payload: dict[str, Any]) -> tuple[str | None, str, str | None]:
@@ -73,10 +97,36 @@ async def receive_webhook(
     settings = get_settings()
     raw_body = await request.body()
 
+    # Diagnostic logging (Safe: NO secrets, keys, or signature digests logged)
+    logger.info(
+        "Received POST /webhook request: body_bytes=%d, verify_signature_config=%s",
+        len(raw_body),
+        settings.verify_webhook_signature,
+    )
+
     # --- Part B: Signature verification ---
     if settings.verify_webhook_signature:
-        sig_header = x_pseudogram_signature or request.headers.get("X-PseudoGram-Signature", "")
-        if not _verify_signature(raw_body, sig_header, settings.pseudogram_api_key):
+        sig_header = (
+            x_pseudogram_signature
+            or request.headers.get("X-PseudoGram-Signature")
+            or request.headers.get("x-pseudogram-signature")
+            or ""
+        )
+
+        is_valid, reason = _verify_signature(
+            raw_body=raw_body,
+            header=sig_header,
+            api_key=settings.pseudogram_api_key,
+        )
+
+        logger.info(
+            "Signature verification check: has_header=%s, is_valid=%s, reason=%s",
+            bool(sig_header),
+            is_valid,
+            reason,
+        )
+
+        if not is_valid:
             raise HTTPException(status_code=401, detail="Invalid or missing webhook signature")
 
     try:

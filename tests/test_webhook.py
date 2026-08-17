@@ -30,49 +30,11 @@ async def _create_rule(app_client, keyword="PRICE", message="Price info!") -> st
 
 
 # -----------------------------------------------------------------------
-# Signature checks
+# Signature checks (Requirement 18)
 # -----------------------------------------------------------------------
 
-async def test_webhook_missing_signature_returns_401(app_client):
-    payload = _comment_payload()
-    raw = json.dumps(payload).encode()
-    resp = await app_client.post(
-        "/webhook",
-        content=raw,
-        headers={"Content-Type": "application/json"},
-    )
-    assert resp.status_code == 401
-
-
-async def test_webhook_invalid_signature_returns_401(app_client):
-    payload = _comment_payload()
-    raw = json.dumps(payload).encode()
-    resp = await app_client.post(
-        "/webhook",
-        content=raw,
-        headers={
-            "Content-Type": "application/json",
-            "X-PseudoGram-Signature": "sha256=deadbeef",
-        },
-    )
-    assert resp.status_code == 401
-
-
-async def test_webhook_wrong_key_returns_401(app_client):
-    payload = _comment_payload()
-    raw, headers = signed_webhook(payload, key="wrong_key")
-    resp = await app_client.post("/webhook", content=raw, headers=headers)
-    assert resp.status_code == 401
-
-
-async def test_webhook_valid_signature_returns_200(app_client):
-    payload = _comment_payload()
-    raw, headers = signed_webhook(payload)
-    resp = await app_client.post("/webhook", content=raw, headers=headers)
-    assert resp.status_code == 200
-
-
-async def test_webhook_signature_disabled_returns_200_without_signature(app_client, monkeypatch):
+async def test_req18_test1_disabled_no_signature(app_client, monkeypatch):
+    """TEST 1: VERIFY_WEBHOOK_SIGNATURE=false, No signature -> HTTP 200"""
     from app.config import get_settings
     get_settings.cache_clear()
     monkeypatch.setenv("VERIFY_WEBHOOK_SIGNATURE", "false")
@@ -84,6 +46,68 @@ async def test_webhook_signature_disabled_returns_200_without_signature(app_clie
         headers={"Content-Type": "application/json"},
     )
     assert resp.status_code == 200
+    get_settings.cache_clear()
+
+
+async def test_req18_test2_enabled_correct_signature(app_client, monkeypatch):
+    """TEST 2: VERIFY_WEBHOOK_SIGNATURE=true, Correct HMAC signature -> HTTP 200"""
+    from app.config import get_settings
+    get_settings.cache_clear()
+    monkeypatch.setenv("VERIFY_WEBHOOK_SIGNATURE", "true")
+    payload = _comment_payload()
+    raw, headers = signed_webhook(payload)
+    resp = await app_client.post("/webhook", content=raw, headers=headers)
+    assert resp.status_code == 200
+    get_settings.cache_clear()
+
+
+async def test_req18_test3_enabled_incorrect_signature(app_client, monkeypatch):
+    """TEST 3: VERIFY_WEBHOOK_SIGNATURE=true, Incorrect signature -> HTTP 401"""
+    from app.config import get_settings
+    get_settings.cache_clear()
+    monkeypatch.setenv("VERIFY_WEBHOOK_SIGNATURE", "true")
+    payload = _comment_payload()
+    raw = json.dumps(payload).encode("utf-8")
+    resp = await app_client.post(
+        "/webhook",
+        content=raw,
+        headers={
+            "Content-Type": "application/json",
+            "X-PseudoGram-Signature": "sha256=invalidhex00000000000000000000000000000000000000000000000000000000",
+        },
+    )
+    assert resp.status_code == 401
+    get_settings.cache_clear()
+
+
+async def test_req18_test4_enabled_missing_signature(app_client, monkeypatch):
+    """TEST 4: VERIFY_WEBHOOK_SIGNATURE=true, Missing signature -> HTTP 401"""
+    from app.config import get_settings
+    get_settings.cache_clear()
+    monkeypatch.setenv("VERIFY_WEBHOOK_SIGNATURE", "true")
+    payload = _comment_payload()
+    raw = json.dumps(payload).encode("utf-8")
+    resp = await app_client.post(
+        "/webhook",
+        content=raw,
+        headers={"Content-Type": "application/json"},
+    )
+    assert resp.status_code == 401
+    get_settings.cache_clear()
+
+
+async def test_req18_test5_raw_body_exact_bytes(app_client, monkeypatch):
+    """TEST 5: Verify signature calculation uses exact raw request body bytes."""
+    from app.config import get_settings
+    get_settings.cache_clear()
+    monkeypatch.setenv("VERIFY_WEBHOOK_SIGNATURE", "true")
+    payload = _comment_payload()
+    raw, headers = signed_webhook(payload)
+
+    # Altering the raw body by even a single byte must cause 401 signature mismatch
+    altered_raw = raw + b" "
+    resp = await app_client.post("/webhook", content=altered_raw, headers=headers)
+    assert resp.status_code == 401
     get_settings.cache_clear()
 
 
